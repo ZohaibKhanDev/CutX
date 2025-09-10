@@ -58,13 +58,13 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.8.2")
     
     // Media3 ExoPlayer for video playback in editor
-    implementation("androidx.media3:media3-exoplayer:1.3.1")
-    implementation("androidx.media3:media3-ui:1.3.1")
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-ui:1.8.0")
     implementation(libs.androidx.media3.ui)
 
     // Media3 Transformer for exporting/processing video (crop/speed)
-    implementation("androidx.media3:media3-transformer:1.3.1")
-    implementation("androidx.media3:media3-effect:1.3.1")
+    implementation("androidx.media3:media3-transformer:1.8.0")
+    implementation("androidx.media3:media3-effect:1.8.0")
 
     // FFmpegKit removed due to artifact retirement; using Media3 Transformer instead
 
