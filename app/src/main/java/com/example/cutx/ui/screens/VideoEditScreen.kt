@@ -1,14 +1,13 @@
 package com.example.cutx.ui.screens
 
-import android.app.Activity
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import android.content.ContentValues
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
@@ -36,29 +35,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.zIndex
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CallSplit
@@ -98,15 +74,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.exoplayer.ExoPlayer
@@ -118,10 +98,6 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
-import android.content.pm.ActivityInfo
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -165,6 +141,7 @@ fun VideoEditScreen(
     var showCropDialog by remember { mutableStateOf(false) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showTrimDialog by remember { mutableStateOf(false) }
+    var isTrimMode by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var exportProgress by remember { mutableStateOf("") }
     var showExportOptions by remember { mutableStateOf(false) }
@@ -370,11 +347,28 @@ fun VideoEditScreen(
         }
 
         // Keep duration/position in sync
-        LaunchedEffect(exoPlayer) {
+        LaunchedEffect(exoPlayer, editState.trim) {
             durationMs = exoPlayer.duration.takeIf { it > 0 } ?: 0L
             while (true) {
                 positionMs = exoPlayer.currentPosition
                 durationMs = exoPlayer.duration.takeIf { it > 0 } ?: durationMs
+
+                // If trimming, clamp playback within [start, end]
+                editState.trim?.let { t ->
+                    if (durationMs > 0) {
+                        val start = t.startMs.coerceIn(0L, durationMs)
+                        val end = t.endMs.coerceIn(start, durationMs)
+                        if (isPlaying) {
+                            if (positionMs < start) {
+                                exoPlayer.seekTo(start)
+                            } else if (positionMs >= end) {
+                                exoPlayer.pause()
+                                exoPlayer.seekTo(start)
+                                isPlaying = false
+                            }
+                        }
+                    }
+                }
                 
                 // Track elapsed time when playing - account for speed changes
                 if (isPlaying) {
@@ -384,12 +378,16 @@ fun VideoEditScreen(
                 }
                 
                 if (!isUserScrubbing && durationMs > 0) {
-                    // Calculate slider position based on actual video position
+                    // Calculate slider position mapping to trimmed window if present
+                    val t = editState.trim
                     val videoPosition = exoPlayer.currentPosition
-                    sliderValue = if (durationMs > 0) {
-                        (videoPosition.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    sliderValue = if (t != null) {
+                        val start = t.startMs.coerceIn(0L, durationMs)
+                        val end = t.endMs.coerceIn(start, durationMs)
+                        val range = (end - start).coerceAtLeast(1L)
+                        ((videoPosition - start).toFloat() / range.toFloat()).coerceIn(0f, 1f)
                     } else {
-                        0f
+                        (videoPosition.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
                     }
                 }
                 kotlinx.coroutines.delay(250)
@@ -412,12 +410,16 @@ fun VideoEditScreen(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Show elapsed time and total duration based on actual video position
-                val currentVideoPosition = exoPlayer.currentPosition
+                // Show elapsed time and total duration (respect trim window if set)
+                val t = editState.trim
+                val start = t?.startMs?.coerceIn(0L, durationMs) ?: 0L
+                val end = t?.endMs?.coerceIn(start, durationMs) ?: durationMs
+                val effectiveDur = (end - start).coerceAtLeast(0L)
+                val currentVideoPosition = (exoPlayer.currentPosition - start).coerceIn(0L, effectiveDur)
                 val elapsedMin = (currentVideoPosition / 1000) / 60
                 val elapsedSec = (currentVideoPosition / 1000) % 60
-                val durMin = (durationMs / 1000) / 60
-                val durSec = (durationMs / 1000) % 60
+                val durMin = (effectiveDur / 1000) / 60
+                val durSec = (effectiveDur / 1000) % 60
                 Text(String.format("%02d:%02d / %02d:%02d", elapsedMin, elapsedSec, durMin, durSec), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp)
                 Text("", color = Color.Transparent, fontSize = 12.sp)
             }
@@ -457,8 +459,12 @@ fun VideoEditScreen(
                                 val fraction = (offset.x.coerceIn(0f, w.toFloat()) / w).coerceIn(0f, 1f)
                                 sliderValue = fraction
                                 if (durationMs > 0) {
-                                    // Seek to the position based on fraction
-                                    val seekTo = (durationMs * fraction).toLong()
+                                    // Map slider to trimmed window if present
+                                    val t = editState.trim
+                                    val start = t?.startMs?.coerceIn(0L, durationMs) ?: 0L
+                                    val end = t?.endMs?.coerceIn(start, durationMs) ?: durationMs
+                                    val range = (end - start)
+                                    val seekTo = if (t != null) (start + (range * fraction)).toLong() else (durationMs * fraction).toLong()
                                     exoPlayer.seekTo(seekTo)
                                     // Reset playback tracking
                                     playbackStartTime = System.currentTimeMillis()
@@ -475,8 +481,12 @@ fun VideoEditScreen(
                                 },
                                 onDragEnd = {
                                     if (durationMs > 0) {
-                                        // Seek to the position based on fraction
-                                        val seekTo = (durationMs * sliderValue).toLong()
+                                        // Seek to the position based on fraction (respect trim)
+                                        val t = editState.trim
+                                        val start = t?.startMs?.coerceIn(0L, durationMs) ?: 0L
+                                        val end = t?.endMs?.coerceIn(start, durationMs) ?: durationMs
+                                        val range = (end - start)
+                                        val seekTo = if (t != null) (start + (range * sliderValue)).toLong() else (durationMs * sliderValue).toLong()
                                         exoPlayer.seekTo(seekTo)
                                         // Reset playback tracking
                                         playbackStartTime = System.currentTimeMillis()
@@ -577,23 +587,58 @@ fun VideoEditScreen(
             }
         }
 
-        // CapCut-style bottom toolbar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .background(Color(0xFF000000))
-                .padding(vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            CapCutBottomTool(icon = Icons.Default.GridOn, label = "Canvas")
-            CapCutBottomTool(icon = Icons.Default.Wallpaper, label = "BG")
-            CapCutBottomTool(icon = Icons.Default.ContentCut, label = "Trim", onClick = { showTrimDialog = true })
-            CapCutBottomTool(icon = Icons.Default.CallSplit, label = "Split")
-            CapCutBottomTool(icon = Icons.Default.Crop, label = "Crop", onClick = { showCropDialog = true })
-            CapCutBottomTool(icon = Icons.Default.Speed, label = "Speed", onClick = { showSpeedDialog = true })
-            CapCutBottomTool(icon = Icons.Default.FilterList, label = "Filter")
+        // CapCut-style bottom toolbar or Trim panel
+        if (!isTrimMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .background(Color(0xFF000000))
+                    .padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CapCutBottomTool(icon = Icons.Default.GridOn, label = "Canvas")
+                CapCutBottomTool(icon = Icons.Default.Wallpaper, label = "BG")
+                CapCutBottomTool(icon = Icons.Default.ContentCut, label = "Trim", onClick = {
+                    // Enter trim mode; pause and seek to current trim start (or 0)
+                    val seekStart = editState.trim?.startMs ?: 0L
+                    exoPlayer.pause()
+                    if (durationMs > 0) {
+                        exoPlayer.seekTo(seekStart.coerceIn(0L, durationMs))
+                    }
+                    isTrimMode = true
+                })
+                CapCutBottomTool(icon = Icons.Default.CallSplit, label = "Split")
+                CapCutBottomTool(icon = Icons.Default.Crop, label = "Crop", onClick = { showCropDialog = true })
+                CapCutBottomTool(icon = Icons.Default.Speed, label = "Speed", onClick = { showSpeedDialog = true })
+                CapCutBottomTool(icon = Icons.Default.FilterList, label = "Filter")
+            }
+        } else {
+            TrimBottomPanel(
+                durationMs = durationMs,
+                initialStartMs = editState.trim?.startMs ?: 0L,
+                initialEndMs = editState.trim?.endMs ?: durationMs,
+                thumbnails = thumbs,
+                onPreviewSeek = { ms ->
+                    if (durationMs > 0) {
+                        exoPlayer.seekTo(ms.coerceIn(0L, durationMs))
+                    }
+                },
+                onCancel = { isTrimMode = false },
+                onClear = {
+                    undoStack.add(EditOp.SetTrim(editState.trim))
+                    redoStack.clear()
+                    editState = editState.copy(trim = null)
+                    isTrimMode = false
+                },
+                onApply = { start, end ->
+                    undoStack.add(EditOp.SetTrim(editState.trim))
+                    redoStack.clear()
+                    editState = editState.copy(trim = TrimRange(start, end))
+                    isTrimMode = false
+                }
+            )
         }
 
         // Fullscreen shown inside an Alert Dialog that covers the screen
@@ -1006,84 +1051,7 @@ fun VideoEditScreen(
             }
         }
 
-        // Trim dialog
-        if (showTrimDialog) {
-            Dialog(onDismissRequest = { showTrimDialog = false }) {
-                Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF1E1E1E)) {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("Trim Video", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Spacer(Modifier.height(16.dp))
-                        
-                        var tempStart by remember { mutableStateOf(editState.trim?.startMs ?: 0L) }
-                        var tempEnd by remember { mutableStateOf(editState.trim?.endMs ?: durationMs) }
-                        
-                        // Start time selector
-                        Text("Start Time", color = Color.White, fontSize = 14.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Slider(
-                            value = if (durationMs > 0) (tempStart.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-                            onValueChange = { fraction ->
-                                tempStart = (fraction * durationMs.toFloat()).toLong().coerceIn(0L, tempEnd)
-                            },
-                            valueRange = 0f..1f
-                        )
-                        Text(
-                            text = formatTime(tempStart),
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp
-                        )
-                        
-                        Spacer(Modifier.height(16.dp))
-                        
-                        // End time selector
-                        Text("End Time", color = Color.White, fontSize = 14.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Slider(
-                            value = if (durationMs > 0) (tempEnd.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 1f,
-                            onValueChange = { fraction ->
-                                tempEnd = (fraction * durationMs.toFloat()).toLong().coerceIn(tempStart, durationMs)
-                            },
-                            valueRange = 0f..1f
-                        )
-                        Text(
-                            text = formatTime(tempEnd),
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp
-                        )
-                        
-                        Spacer(Modifier.height(16.dp))
-                        
-                        // Duration display
-                        Text(
-                            text = "Duration: ${formatTime(tempEnd - tempStart)}",
-                            color = Color.White.copy(alpha = 0.9f),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        
-                        Spacer(Modifier.height(16.dp))
-                        
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = { showTrimDialog = false }) { Text("Cancel") }
-                            Row {
-                                TextButton(onClick = {
-                                    undoStack.add(EditOp.SetTrim(editState.trim))
-                                    redoStack.clear()
-                                    editState = editState.copy(trim = null)
-                                    showTrimDialog = false
-                                }) { Text("Clear") }
-                                TextButton(onClick = {
-                                    undoStack.add(EditOp.SetTrim(editState.trim))
-                                    redoStack.clear()
-                                    editState = editState.copy(trim = TrimRange(tempStart, tempEnd))
-                                    showTrimDialog = false
-                                }) { Text("Apply") }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Legacy trim dialog no longer used (replaced by TrimBottomPanel)
 
         // Export options dialog
         if (showExportOptions) {
@@ -1417,20 +1385,26 @@ private suspend fun exportWithTransformerSuspending(
         val transformer = Transformer.Builder(context)
             .build()
         
-        // Build edited media item with effects
-        val editedBuilder = EditedMediaItem.Builder(MediaItem.fromUri(inputUri))
-        
-        // Apply trim if specified
-        editState.trim?.let { trim ->
+        // Build base media item, applying trim via clipping if present
+        val baseMediaItem = editState.trim?.let { trim ->
             try {
-                // For now, we'll log the trim settings but not apply them in export
-                // TODO: Implement proper trim functionality when Media3 API is stable
-                android.util.Log.i("VideoExport", "Trim requested: ${trim.startMs}ms to ${trim.endMs}ms (not yet implemented in export)")
-                android.util.Log.w("VideoExport", "Trim functionality is available in UI but not yet implemented in export")
-            } catch (e: Exception) {
-                android.util.Log.e("VideoExport", "Failed to process trim: ${e.message}", e)
+                val clipping = MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(trim.startMs)
+                    .setEndPositionMs(trim.endMs)
+                    .build()
+                MediaItem.Builder()
+                    .setUri(inputUri)
+                    .setClippingConfiguration(clipping)
+                    .build()
+            } catch (_: Throwable) {
+                MediaItem.fromUri(inputUri)
             }
-        }
+        } ?: MediaItem.fromUri(inputUri)
+
+        // Build edited media item with effects
+        val editedBuilder = EditedMediaItem.Builder(baseMediaItem)
+        
+        // (Clipping applied above via MediaItem)
         
         // Apply speed changes using SpeedChangeEffect
         if (editState.speed != 1f) {
@@ -1563,4 +1537,215 @@ private fun saveVideoToGallery(context: Context, videoFile: File) {
     }
 }
 
+
+@Composable
+private fun TrimBottomPanel(
+    durationMs: Long,
+    initialStartMs: Long,
+    initialEndMs: Long,
+    thumbnails: List<Bitmap>,
+    onPreviewSeek: (Long) -> Unit,
+    onCancel: () -> Unit,
+    onClear: () -> Unit,
+    onApply: (startMs: Long, endMs: Long) -> Unit
+) {
+    var startMs by remember { mutableStateOf(initialStartMs.coerceIn(0L, durationMs)) }
+    var endMs by remember { mutableStateOf(initialEndMs.coerceIn(0L, durationMs)) }
+    val minGapMs = 500L
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF0F0F0F))
+            .navigationBarsPadding()
+            .padding(top = 8.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, contentDescription = null, tint = Color.White)
+                Spacer(Modifier.width(4.dp))
+                Text("Cancel", color = Color.White)
+            }
+            Text("Trim", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            TextButton(onClick = { onApply(startMs, endMs) }) {
+                Icon(Icons.Default.Check, contentDescription = null, tint = Color.White)
+                Spacer(Modifier.width(4.dp))
+                Text("Apply", color = Color.White)
+            }
+        }
+
+        // Thumbnail strip with draggable handles
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+        ) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                items(thumbnails) { bmp ->
+                    androidx.compose.foundation.Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .height(72.dp)
+                            .width(60.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                    )
+                }
+            }
+
+            // Overlay for handles and shading
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .align(Alignment.Center)
+            ) {
+                var containerWidth by remember { mutableStateOf(0f) }
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                var dragMode by remember { mutableStateOf<String?>(null) } // "start", "end", "middle"
+
+                // Draw shaded outside area and rails
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .onGloballyPositioned { layoutCoordinates ->
+                            containerWidth = layoutCoordinates.size.width.toFloat()
+                        }
+                ) {
+                    if (durationMs <= 0L || containerWidth <= 0f) return@Canvas
+                    val centerY = size.height / 2f
+                    val startX = (startMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) * size.width
+                    val endX = (endMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) * size.width
+
+                    // Darken outside selected range
+                    drawRect(
+                        color = Color.Black.copy(alpha = 0.5f),
+                        size = androidx.compose.ui.geometry.Size(startX.coerceAtLeast(0f), size.height)
+                    )
+                    drawRect(
+                        color = Color.Black.copy(alpha = 0.5f),
+                        topLeft = Offset(endX.coerceAtMost(size.width), 0f),
+                        size = androidx.compose.ui.geometry.Size((size.width - endX).coerceAtLeast(0f), size.height)
+                    )
+
+                    // Top and bottom rails
+                    drawLine(
+                        color = Color.White,
+                        start = Offset(startX, 0f),
+                        end = Offset(endX, 0f),
+                        strokeWidth = 3f
+                    )
+                    drawLine(
+                        color = Color.White,
+                        start = Offset(startX, size.height),
+                        end = Offset(endX, size.height),
+                        strokeWidth = 3f
+                    )
+
+                    // Handle guides (thicker, clearly visible)
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = Offset((startX - 6f).coerceAtLeast(0f), 0f),
+                        size = androidx.compose.ui.geometry.Size(12f, size.height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+                    )
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = Offset((endX - 6f).coerceIn(0f, size.width - 12f), 0f),
+                        size = androidx.compose.ui.geometry.Size(12f, size.height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+                    )
+                }
+
+                // Unified drag interaction with explicit drag mode selection on start
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(durationMs, startMs, endMs, containerWidth) {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    if (durationMs <= 0L || containerWidth <= 0f) return@detectDragGestures
+                                    val startX = (startMs.toFloat() / durationMs.toFloat()) * containerWidth
+                                    val endX = (endMs.toFloat() / durationMs.toFloat()) * containerWidth
+                                    val touchRadiusPx = with(density) { 24.dp.toPx() }
+                                    dragMode = when {
+                                        kotlin.math.abs(offset.x - startX) <= touchRadiusPx -> "start"
+                                        kotlin.math.abs(offset.x - endX) <= touchRadiusPx -> "end"
+                                        offset.x in startX..endX -> "middle"
+                                        else -> null
+                                    }
+                                },
+                                onDragEnd = { dragMode = null },
+                                onDragCancel = { dragMode = null }
+                            ) { _, dragAmount ->
+                                if (durationMs <= 0L || containerWidth <= 0f) return@detectDragGestures
+                                val pxToMs = durationMs.toFloat() / containerWidth
+                                when (dragMode) {
+                                    "start" -> {
+                                        val newStart = (startMs + dragAmount.x * pxToMs).toLong()
+                                        startMs = newStart.coerceIn(0L, endMs - minGapMs)
+                                        onPreviewSeek(startMs)
+                                    }
+                                    "end" -> {
+                                        val newEnd = (endMs + dragAmount.x * pxToMs).toLong()
+                                        endMs = newEnd.coerceIn(startMs + minGapMs, durationMs)
+                                        onPreviewSeek(endMs)
+                                    }
+                                    "middle" -> {
+                                        val window = endMs - startMs
+                                        var newStart = (startMs + dragAmount.x * pxToMs).toLong()
+                                        var newEnd = newStart + window
+                                        if (newStart < 0L) {
+                                            newStart = 0L
+                                            newEnd = window
+                                        }
+                                        if (newEnd > durationMs) {
+                                            newEnd = durationMs
+                                            newStart = (durationMs - window).coerceAtLeast(0L)
+                                        }
+                                        startMs = newStart
+                                        endMs = newEnd
+                                        onPreviewSeek(startMs)
+                                    }
+                                    else -> {}
+                                }
+                            }
+                        }
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Time readout and actions
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "${formatTime(startMs)} - ${formatTime(endMs)} (${formatTime(endMs - startMs)})",
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 14.sp
+            )
+            TextButton(onClick = onClear) {
+                Text("Clear", color = Color.White)
+            }
+        }
+    }
+}
 
